@@ -1,9 +1,8 @@
 use once_cell::sync::Lazy;
-use secrecy::ExposeSecret;
-use sqlx::PgPool;
+use sqlx::{Connection, Executor, PgConnection, PgPool};
 use std::net::TcpListener;
 use zero2prod::{
-    configuration::get_configuration,
+    configuration::{get_configuration, DatabaseSettings},
     startup::run,
     telemetry::{get_subscriber, init_subscriber},
 };
@@ -25,6 +24,26 @@ pub struct TestApp {
     pub db_pool: PgPool,
 }
 
+pub async fn configure_database(config: &DatabaseSettings) -> PgPool {
+    let mut connection = PgConnection::connect_with(&config.without_db())
+        .await
+        .expect("Failed to connect to Postgres");
+    connection
+        .execute(format!(r#"CREATE DATABASE "{}";"#, config.database_name).as_str())
+        .await
+        .expect("Failed to create database");
+
+    let connection_pool = PgPool::connect_with(config.with_db())
+        .await
+        .expect("Failed to connect to Postgres.");
+    sqlx::migrate!("./migrations")
+        .run(&connection_pool)
+        .await
+        .expect("Failed to migrate the database");
+
+    connection_pool
+}
+
 async fn spawn_app() -> TestApp {
     Lazy::force(&TRACING);
 
@@ -33,14 +52,9 @@ async fn spawn_app() -> TestApp {
     let address = format!("http://127.0.0.1:{}", port);
 
     let configuration = get_configuration().expect("Failed to read configuration.");
-    let connection_pool = PgPool::connect(
-        &configuration
-            .database
-            .connection_string_without_db()
-            .expose_secret(),
-    )
-    .await
-    .expect("Failed to connect to Postgres.");
+    let connection_pool = PgPool::connect_with(configuration.database.with_db())
+        .await
+        .expect("Failed to connect to Postgres.");
 
     let server = run(listener, connection_pool.clone()).expect("Failed to bind address");
 
